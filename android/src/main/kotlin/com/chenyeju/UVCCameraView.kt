@@ -66,7 +66,15 @@ internal class UVCCameraView(
 
     companion object {
         private const val TAG = "CameraView"
+
+        // Preview frames allowed in the main-thread queue before new ones are
+        // dropped. Two absorbs scheduling jitter without letting a stalled UI
+        // thread accumulate frames (see PreviewFrameGate).
+        private const val MAX_PENDING_PREVIEW_FRAMES = 2
     }
+
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private val previewFrameGate = PreviewFrameGate(MAX_PENDING_PREVIEW_FRAMES)
 
 //    init{
 //        processingParams()
@@ -107,6 +115,7 @@ internal class UVCCameraView(
     }
 
     override fun dispose() {
+        captureStreamStop()
         unRegisterMultiCamera()
         mViewBinding.fragmentContainer.removeAllViews()
     }
@@ -433,6 +442,7 @@ internal class UVCCameraView(
     }
 
     fun closeCamera() {
+        captureStreamStop()
         getCurrentCamera()?.closeCamera()
     }
 
@@ -498,7 +508,14 @@ internal class UVCCameraView(
             .setPreviewFormat(CameraRequest.PreviewFormat.FORMAT_MJPEG)
             .setAspectRatioShow(true)
             .setCaptureRawImage(false)
-            .setRawPreviewData(false)
+            // Raw preview data: frames reach onPreviewData as NV21 at the
+            // capture resolution (1280x720 = 1.4 MB), freshly allocated per
+            // frame, straight from the decoder thread. With false, libausbc
+            // instead reads the OpenGL surface back as RGBA at the on-screen
+            // size (7-10 MB per frame) into one shared buffer, which is both
+            // far heavier to ship through the platform channel and racy.
+            // The screen preview is unaffected: OpenGL rendering stays on.
+            .setRawPreviewData(true)
             .create()
     }
 
@@ -544,6 +561,7 @@ internal class UVCCameraView(
             getCurrentCamera()?.removePreviewDataCallBack(currentCallback)
             previewDataCallback = null
         }
+        previewFrameGate.reset()
         // getCurrentCamera()?.captureStreamStop()
     }
     /**
@@ -572,18 +590,32 @@ internal class UVCCameraView(
 
     private var previewDataCallback: IPreviewDataCallBack? = null
     private fun setPreviewDataCallBack() {
+        // Idempotent: libausbc keeps a list of callbacks and captureStreamStop
+        // only removes the one we remember, so registering a second instance
+        // would leak the first and deliver every frame twice.
+        if (previewDataCallback != null) {
+            return
+        }
         val callback =  object : IPreviewDataCallBack {
             override fun onPreviewData(data: ByteArray?, width: Int, height: Int, format: IPreviewDataCallBack.DataFormat) {
-                if (data != null) {
-                    val args = hashMapOf<String, Any>(
-                        "data" to data,
-                        "width" to width,
-                        "height" to height,
-                        "format" to format.name
-                    )
-                    Handler(Looper.getMainLooper()).post {
-                        mChannel.invokeMethod("onPreviewData", args)
+                if (data == null) return
+                if (!previewFrameGate.tryAcquire()) {
+                    val dropped = previewFrameGate.droppedCount
+                    if (dropped % 60 == 0L) {
+                        Logger.w(TAG, "main thread busy, dropped $dropped preview frames")
                     }
+                    return
+                }
+                val args = hashMapOf<String, Any>(
+                    "data" to data,
+                    "width" to width,
+                    "height" to height,
+                    "format" to format.name
+                )
+                mainHandler.post {
+                    previewFrameGate.release()
+                    if (previewDataCallback == null) return@post
+                    mChannel.invokeMethod("onPreviewData", args)
                 }
             }
         }

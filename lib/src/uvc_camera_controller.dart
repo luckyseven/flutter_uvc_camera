@@ -96,6 +96,13 @@ class UVCCameraController {
   //   }
   // }
 
+  /// Starts delivering preview frames to [CameraStreamCallback].
+  ///
+  /// Frames arrive as `{'data': Uint8List, 'width': int, 'height': int,
+  /// 'format': String}`; on Android `format` is `NV21` at the capture
+  /// resolution. Delivery is bounded: frames are dropped while the platform
+  /// thread is still busy handing over earlier ones. Calling this more than
+  /// once without [captureStreamStop] is a no-op.
   void captureStreamStart() {
     _cameraChannel?.invokeMethod('captureStreamStart');
   }
