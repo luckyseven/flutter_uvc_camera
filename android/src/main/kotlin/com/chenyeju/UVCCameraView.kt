@@ -115,6 +115,7 @@ internal class UVCCameraView(
     }
 
     override fun dispose() {
+        detachRawFrameTap()
         captureStreamStop()
         unRegisterMultiCamera()
         mViewBinding.fragmentContainer.removeAllViews()
@@ -126,8 +127,14 @@ internal class UVCCameraView(
         msg: String?
     ) {
         when (code) {
-            ICameraStateCallBack.State.OPENED -> handleCameraOpened()
-            ICameraStateCallBack.State.CLOSED -> handleCameraClosed()
+            ICameraStateCallBack.State.OPENED -> {
+                attachRawFrameTap(self)
+                handleCameraOpened()
+            }
+            ICameraStateCallBack.State.CLOSED -> {
+                detachRawFrameTap()
+                handleCameraClosed()
+            }
             ICameraStateCallBack.State.ERROR -> handleCameraError(msg)
         }
         Logger.i(TAG, "------>CameraState: $code") ;
@@ -144,6 +151,34 @@ internal class UVCCameraView(
     private fun handleCameraOpened() {
         mChannel.invokeMethod("CameraState", "OPENED")
         setButtonCallback()
+    }
+
+    // Native raw-frame tap (see UvcRawFrameTap): registered for the whole time
+    // the camera is open, independent of the Flutter preview-data stream that
+    // captureStreamStart/Stop toggle. Runs on the decoder thread.
+    private var rawTapCamera: MultiCameraClient.ICamera? = null
+    private val rawTapCallback = object : IPreviewDataCallBack {
+        override fun onPreviewData(
+            data: ByteArray?,
+            width: Int,
+            height: Int,
+            format: IPreviewDataCallBack.DataFormat
+        ) {
+            if (data == null) return
+            UvcRawFrameTap.deliver(data, width, height, format.name)
+        }
+    }
+
+    private fun attachRawFrameTap(camera: MultiCameraClient.ICamera) {
+        if (rawTapCamera === camera) return
+        detachRawFrameTap()
+        camera.addPreviewDataCallBack(rawTapCallback)
+        rawTapCamera = camera
+    }
+
+    private fun detachRawFrameTap() {
+        rawTapCamera?.removePreviewDataCallBack(rawTapCallback)
+        rawTapCamera = null
     }
 
     fun registerMultiCamera() {
@@ -442,6 +477,7 @@ internal class UVCCameraView(
     }
 
     fun closeCamera() {
+        detachRawFrameTap()
         captureStreamStop()
         getCurrentCamera()?.closeCamera()
     }

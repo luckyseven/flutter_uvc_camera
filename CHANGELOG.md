@@ -1,3 +1,11 @@
+## 0.0.6
+
+* Android: `UvcRawFrameTap`, a native sink for the raw preview frames (NV21
+  at the capture resolution) delivered on the decoder thread for the whole
+  time the camera is open, independent of `captureStreamStart/Stop`. Lets the
+  host app consume frames (e.g. a local recorder) without a platform-channel
+  hop.
+
 ## 0.0.5
 
 * Android: preview frames (`onPreviewData`) are delivered as raw NV21 at the
